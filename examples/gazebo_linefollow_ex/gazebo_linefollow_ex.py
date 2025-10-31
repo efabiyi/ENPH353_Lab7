@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import gym
-from gym import wrappers
 import gym_gazebo
 import time
 import numpy

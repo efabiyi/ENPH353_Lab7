@@ -40,23 +40,12 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
         self.bridge = CvBridge()
         self.timeout = 0  # Used to keep track of images with no line detected
 
-
-
-    # TODO: Analyze the cv_image and compute the state array and
-    # episode termination condition.
-    #
-    # The state array is a list of 10 elements indicating where in the
-    # image the line is:
-    # i.e.
-    #    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0] indicates line is on the left
-    #    [0, 0, 0, 0, 1, 0, 0, 0, 0, 0] indicates line is in the center
-    #
-    # The episode termination condition should be triggered when the line
-    # is not detected for more than 30 frames. In this case set the done
-    # variable to True.
-    #
-    # You can use the self.timeout variable to keep track of which frames
-    # have no line detected.
+        self.data = None
+        self.image_sub = rospy.Subscriber("pi_camera/image_raw", Image, self.callback)
+    
+    def callback(self, msg):
+        self.data = msg
+        rospy.logdebug("Image callback received. timestamp: %s", str(msg.header.stamp))
 
     def process_image(self, data):
         '''
@@ -70,12 +59,11 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
         except CvBridgeError as e:
             print(e)
 
-        #cv2.imshow("raw", cv_image)
 
-        NUM_BINS = 10
-        state = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        NUM_BINS = 9
+        state = [0, 0, 0, 0, 0, 0, 0, 0, 0]
         done = False
-        uniform_area_detected = False
+        no_line_detected = True
         
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -96,9 +84,8 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
 
             roi_variance = np.var(roi)
         
-            if roi_variance < 20:  # Adjust this threshold as needed
-                uniform_area_detected = True
-                continue  # Skip this region as it's too uniform to detect the line
+            if roi_variance < 20: 
+                continue  # Skip this region as it's too uniform to detect the line, penalize later
 
             contours,_ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -110,22 +97,17 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
                 max_area = area
                 max_index = i
 
-        if uniform_area_detected:
-            self.timeout += 1
+            no_line_detected = False
 
-            # If max_index is outside the center region, penalize
-            if max_index not in (2, 3, 4, 5, 6):
-                state[max_index] = 1  # The robot is still following a line but in a side region
-                self.timeout += 1  # Penalize with timeout increment
-            else:
-                state[max_index] = 1  # The robot is in the center of the line
-                self.timeout = 0  # Reset timeout if it's in the center
+        if no_line_detected:
+             # No line detected in the frame!! Timeout!
+            self.timeout += 1
         else:
-            # No line detected in the frame
-            self.timeout += 1
+            state[max_index] = 1  # The robot is in the center of the line
+            self.timeout = 0  # Reset timeout if it's in the center
 
-        # If timeout exceeds a threshold (e.g., 20 frames with no line detected), end the episode
-        if self.timeout >= 10:
+        # If timeout exceeds a threshold end the episode
+        if self.timeout >= 30:
             done = True
 
 
@@ -143,17 +125,23 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
             @param state : The state array representing where the line is
         '''
         height, width, _ = image.shape
+
+        start_point = (0, int(height*0.75))    
+        end_point = (width, int(height*0.75))
+        
         num_bins = len(state)
 
         # Draw a rectangle in each bin if state indicates line presence
         bin_width = width // num_bins
+
         for i in range(num_bins):
             if state[i] == 1:
                 x_start = i * bin_width
                 x_end = (i + 1) * bin_width
                 cv2.rectangle(image, (x_start, 0), (x_end, height), (0, 255, 0), 2)  # Green rectangle
+                cv2.line(image,start_point, end_point,(255,0,0),2 )
 
-        # Optionally, add text to indicate state
+        # Add text to indicate state
         font = cv2.FONT_HERSHEY_SIMPLEX
         text = "State: " + ''.join([str(s) for s in state])
         cv2.putText(image, text, (10, 30), font, 0.8, (0, 0, 0), 2)
@@ -174,41 +162,29 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
 
         vel_cmd = Twist()
 
-        if action == 0:  # Move forward slowly
-            vel_cmd.linear.x = 0.2
-            vel_cmd.angular.z = 0.0
-        elif action == 1:  # Move forward quickly
+        if action == 0:  # Move forward 
             vel_cmd.linear.x = 0.5
             vel_cmd.angular.z = 0.0
-        elif action == 2:  # Turn left slowly
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = 0.2
-        elif action == 3:  # Turn left moderately
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = 0.5
-        elif action == 4:  # Turn left quickly
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = 0.8
-        elif action == 5:  # Turn right slowly
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = -0.2
-        elif action == 6:  # Turn right moderately
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = -0.5
-        elif action == 7:  # Turn right quickly
-            vel_cmd.linear.x = 0.0
-            vel_cmd.angular.z = -0.8
 
+        elif action == 1:  # Turn left 
+            vel_cmd.linear.x = 0.1
+            vel_cmd.angular.z = 0.5
+
+        elif action == 2:  # Turn right
+            vel_cmd.linear.x = 0.1
+            vel_cmd.angular.z = -0.5
 
         self.vel_pub.publish(vel_cmd)
+        
+        wait_time = 0
+        while self.data is None and wait_time < 5:
+            rospy.sleep(0.1)
+            wait_time += 0.1
 
-        data = None
-        while data is None:
-            try:
-                data = rospy.wait_for_message('/pi_camera/image_raw', Image,
-                                              timeout=5)
-            except:
-                pass
+        if self.data is None:
+            rospy.logwarn("No image data received from camera.")
+            done = True
+            return [0]*10, -200, done, {} 
 
         rospy.wait_for_service('/gazebo/pause_physics')
         try:
@@ -217,28 +193,37 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
         except (rospy.ServiceException) as e:
             print ("/gazebo/pause_physics service call failed")
 
-        state, done = self.process_image(data)
+        state, done = self.process_image(self.data)
+
+        line_index = np.argmax(state) if np.any(state) else -1
+        centre_bins = [3,4,5]
 
         # Set the rewards for your action
         if not done:
-            if action == 0:  # Move forward slowly
-                reward = 2  # Small reward for slow forward movement
-            elif action == 1:  # Move forward quickly
-                reward = 3.5  # Larger reward for quick forward movement
-            elif action == 2:  # Turn left slowly
-                reward = 2.5  # Small reward for slow left turn
-            elif action == 3:  # Turn left moderately
-                reward = 3.5  # Moderate reward for moderate left turn
-            elif action == 4:  # Turn left quickly
-                reward = 5.5  # Larger reward for sharp left turn
-            elif action == 5:  # Turn right slowly
-                reward = 2  # Small reward for slow right turn
-            elif action == 6:  # Turn right moderately
-                reward = 3  # Moderate reward for moderate right turn
-            elif action == 7:  # Turn right quickly
-                reward = 5  # Larger reward for sharp right turn
+            reward = -0.1
+            #if you're in the centre you get rewarded, else you're done for!
+            if line_index in centre_bins:
+                if action == 0:  # Move forward slowly
+                    reward = 5  
+
+                elif action == 1:  # Move left 
+                    reward =  0 
+
+                elif action == 2:  # Move right
+                    reward = 0  
+            else:
+                if action == 0:  
+                    reward = -20  
+
+                elif action == 1: 
+                    reward = -20  
+
+                elif action == 2:  
+                    reward = -20 
         else:
             reward = -200
+        
+        rospy.sleep(0.001)
 
         return state, reward, done, {}
 
@@ -265,15 +250,19 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
             print ("/gazebo/unpause_physics service call failed")
 
         # read image data
-        data = None
-        while data is None:
-            try:
-                data = rospy.wait_for_message('/pi_camera/image_raw',
-                                              Image, timeout=5)
-            except:
-                pass
+
+        wait_time = 0
+        while self.data is None and wait_time < 5:
+            rospy.sleep(0.1)
+            wait_time += 0.1
+
+        if self.data is None:
+            rospy.logwarn("No image data received from camera.")
+            done = True
+            return [0]*10, -200, done, {} 
 
         rospy.wait_for_service('/gazebo/pause_physics')
+
         try:
             # resp_pause = pause.call()
             self.pause()
@@ -281,6 +270,6 @@ class Gazebo_Linefollow_Env(gazebo_env.GazeboEnv):
             print ("/gazebo/pause_physics service call failed")
 
         self.timeout = 0
-        state, done = self.process_image(data)
+        state, done = self.process_image(self.data)
 
         return state
